@@ -1,0 +1,8 @@
+.esphome/
+.venv/
+__pycache__/
+secrets.yaml
+*.bin
+*.elf
+.DS_Store
+stock.yaml

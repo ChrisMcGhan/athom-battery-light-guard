@@ -1,0 +1,75 @@
+packages:
+  stock: !include stock.yaml
+substitutions:
+  project_version: "battery-guard-1.3"
+  log_level: INFO
+esphome:
+  includes:
+    - guard.h
+wifi:
+  reboot_timeout: 0s
+update:
+  - id: !remove update_http_request
+remote_receiver:
+  - id: !extend rf_receiver
+    idle: 6ms
+    receive_symbols: 512
+    buffer_size: 10000b
+    on_raw:
+      - lambda: |-
+          for (size_t i = 0; i + 67 <= x.size(); ++i) {
+            auto code = battery_guard::frame(x.data(), x.size(), i);
+            if (code && battery_guard::instance.receive(code, millis())) {
+              ESP_LOGI("battery_guard", "Heard %s", battery_guard::instance.command);
+            }
+          }
+text_sensor:
+  - platform: template
+    name: "Battery Light Last Command"
+    lambda: return std::string(battery_guard::instance.command);
+    update_interval: 1s
+  - platform: template
+    name: "Battery Light Protection"
+    lambda: return std::string(battery_guard::instance.status);
+    update_interval: 1s
+  - platform: template
+    name: "Battery Light Last Action"
+    lambda: return std::string(battery_guard::instance.action);
+    update_interval: 1s
+sensor:
+  - platform: template
+    name: "Battery Light Fallback Remaining"
+    unit_of_measurement: s
+    accuracy_decimals: 0
+    lambda: return battery_guard::instance.remaining(millis());
+    update_interval: 5s
+  - platform: template
+    name: "Battery Light Command Count"
+    accuracy_decimals: 0
+    lambda: return battery_guard::instance.count;
+    update_interval: 1s
+interval:
+  - interval: 1s
+    then:
+      - if:
+          condition:
+            lambda: return battery_guard::instance.tick(millis());
+          then:
+            - script.execute: battery_light_off
+script:
+  - id: battery_light_off
+    mode: single
+    then:
+      - remote_transmitter.transmit_raw:
+          transmitter_id: rf_transmitter
+          carrier_frequency: 0Hz
+          code: [8182, -4009, 504, -1598, 497, -1599, 496, -1599, 497, -523, 490, -523, 490, -523, 491, -524, 489, -529, 490, -1602, 494, -523, 490, -523, 490, -1599, 496, -521, 492, -1598, 496, -1600, 496, -529, 492, -521, 491, -524, 490, -521, 491, -1598, 495, -1600, 497, -523, 490, -521, 492, -530, 490, -523, 490, -523, 490, -522, 490, -1598, 497, -523, 490, -523, 492, -521, 490, -1597, 496, -1641, 8180, -4007, 505, -1598, 497, -1596, 497, -1600, 496, -521, 493, -523, 489, -523, 490, -522, 491, -528, 491, -1599, 495, -523, 492, -520, 491, -1599, 497, -521, 490, -1597, 497, -1600, 495, -530, 490, -523, 490, -523, 490, -523, 489, -1598, 497, -1598, 497, -520, 492, -521, 492, -529, 491, -521, 491, -522, 492, -521, 490, -1600, 494, -523, 490, -523, 490, -523, 489, -1596, 495, -1642, 8179, -4004, 506, -1596, 497, -1597, 497, -1598, 495, -525, 489, -521, 491, -522, 491, -522, 490, -528, 492, -1597, 497, -521, 490, -523, 490, -1597, 497, -521, 490, -1597, 496, -1599, 495, -530, 490, -523, 490, -523, 489, -521, 490, -1598, 497, -1597, 497, -521, 491, -522, 490, -530, 490, -523, 490, -521, 492, -520, 491, -1599, 495, -523, 490, -522, 491, -520, 490, -1596, 496, -1640, 8177, -4005, 506, -1595, 497, -1598, 496, -1598, 496, -522, 491, -520, 492, -523, 490, -521, 491, -528, 491, -1597, 497, -521, 492, -520, 491, -1599, 495, -520, 491, -1597, 497, -1597, 495, -530, 490, -523, 490, -521, 492, -521, 490, -1597, 497, -1595, 498, -522, 490, -523, 490, -530, 489, -522, 490, -523, 490, -520, 491, -1597, 497, -522, 491, -522, 489, -522, 490, -1595, 495, -1640]
+button:
+  - platform: template
+    name: "Battery Light Verified Power Off"
+    on_press:
+      - lambda: |-
+          battery_guard::instance.active = false;
+          battery_guard::instance.status = "Off sent (unconfirmed)";
+          battery_guard::instance.action = "Manual Power Off transmitted";
+      - script.execute: battery_light_off
