@@ -4,6 +4,18 @@ ESPHome firmware overlay for an Athom ESP32 RF/IR Remote. It listens for a speci
 
 Current version: **battery-guard-1.3**, built with **ESPHome 2026.9.0**.
 
+## AI creation and human direction
+
+The custom firmware overlay, RF decoder, tests, and project documentation were created with **OpenAI Codex** under the direction of **Chris McGhan**. Chris defined the requirements, operated the physical remote, and confirmed the observed light behavior during hardware testing. The underlying ESPHome platform and Athom configuration are third-party work credited below.
+
+This AI contribution includes the initial firmware publication in commit `ba76704753258e49e1a84ba5103f4686c98957ee`, even though that commit originally listed only Chris as its author. AI-assisted commits can record Codex's contribution with this Git trailer:
+
+```text
+Co-authored-by: Codex <noreply@openai.com>
+```
+
+See [GitHub's co-author documentation](https://docs.github.com/en/pull-requests/how-tos/commit-changes/creating-a-commit-with-multiple-authors). Commit attribution and GitHub's repository Contributors display are separate; a trailer does not guarantee a particular sidebar listing.
+
 ## Behavior
 
 - Power On starts/restarts a 300-second fallback from that press.
