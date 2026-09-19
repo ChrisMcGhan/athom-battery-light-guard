@@ -1,0 +1,15 @@
+report_missed_on:
+  name: Report missed Power On
+  description: Preserve recent private RF diagnostics in a compressed incident file.
+  fields:
+    lookback_minutes:
+      name: Lookback minutes
+      default: 60
+      selector:
+        number:
+          min: 1
+          max: 1440
+    note:
+      name: Note
+      selector:
+        text:

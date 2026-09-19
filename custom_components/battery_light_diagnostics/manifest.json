@@ -1,0 +1,10 @@
+{
+  "domain": "battery_light_diagnostics",
+  "name": "Battery Light RF Diagnostics",
+  "version": "1.0.0",
+  "documentation": "https://github.com/ChrisMcGhan/athom-battery-light-guard",
+  "issue_tracker": "https://github.com/ChrisMcGhan/athom-battery-light-guard/issues",
+  "codeowners": ["@ChrisMcGhan"],
+  "dependencies": ["esphome"],
+  "iot_class": "local_push"
+}

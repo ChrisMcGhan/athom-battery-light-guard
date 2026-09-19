@@ -1,0 +1,7 @@
+# Copy custom_components/battery_light_diagnostics into HA's /config/custom_components.
+# Add this configuration (or use a package), run HA's configuration check, and restart HA.
+battery_light_diagnostics:
+  host: !secret battery_light_athom_host
+  expected_mac: !secret battery_light_athom_mac
+  # password: !secret battery_light_api_password
+  # noise_psk: !secret battery_light_api_encryption_key

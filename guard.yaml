@@ -1,11 +1,12 @@
 packages:
   stock: !include stock.yaml
 substitutions:
-  project_version: "battery-guard-1.3"
+  project_version: "battery-guard-1.4"
   log_level: INFO
 esphome:
   includes:
     - guard.h
+    - diagnostics.h
 wifi:
   reboot_timeout: 0s
 update:
@@ -17,6 +18,7 @@ remote_receiver:
     buffer_size: 10000b
     on_raw:
       - lambda: |-
+          battery_guard::diagnostics.observe(x.data(), x.size(), millis());
           for (size_t i = 0; i + 67 <= x.size(); ++i) {
             auto code = battery_guard::frame(x.data(), x.size(), i);
             if (code && battery_guard::instance.receive(code, millis())) {
@@ -38,6 +40,27 @@ text_sensor:
     update_interval: 1s
 sensor:
   - platform: template
+    name: "Battery Light Raw Bursts"
+    accuracy_decimals: 0
+    lambda: return battery_guard::diagnostics.raw_bursts;
+    update_interval: 30s
+  - platform: template
+    name: "Battery Light Rejected Candidates"
+    accuracy_decimals: 0
+    lambda: return battery_guard::diagnostics.rejected_frames;
+    update_interval: 30s
+  - platform: template
+    name: "Battery Light Receiver Errors"
+    accuracy_decimals: 0
+    lambda: return battery_guard::diagnostics.receiver_errors;
+    update_interval: 30s
+  - platform: template
+    name: "Battery Light Diagnostic Overwrites"
+    accuracy_decimals: 0
+    lambda: |-
+      return battery_guard::diagnostics.sequence > 12 ? battery_guard::diagnostics.sequence - 12 : 0;
+    update_interval: 30s
+  - platform: template
     name: "Battery Light Fallback Remaining"
     unit_of_measurement: s
     accuracy_decimals: 0
@@ -49,6 +72,12 @@ sensor:
     lambda: return battery_guard::instance.count;
     update_interval: 1s
 interval:
+  - interval: 250ms
+    then:
+      - lambda: |-
+          char record[1536];
+          if (battery_guard::diagnostics.next_dump(record, sizeof(record)))
+            ESP_LOGI("battery_guard_diag", "%s", record);
   - interval: 1s
     then:
       - if:
@@ -73,3 +102,15 @@ button:
           battery_guard::instance.status = "Off sent (unconfirmed)";
           battery_guard::instance.action = "Manual Power Off transmitted";
       - script.execute: battery_light_off
+
+api:
+  actions:
+    - action: diagnostic_snapshot
+      then:
+        - lambda: battery_guard::diagnostics.request_dump();
+logger:
+  tx_buffer_size: 2048
+  on_message:
+    - lambda: |-
+        if (level <= 2 && strncmp(tag, "remote_receiver", 15) == 0)
+          ++battery_guard::diagnostics.receiver_errors;

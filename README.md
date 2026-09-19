@@ -2,7 +2,7 @@
 
 ESPHome firmware overlay for an Athom ESP32 RF/IR Remote. It listens for a specific 433.92 MHz battery-light remote and sends Power Off **five minutes after Power On**, unless a native timer button was heard. The countdown runs on the Athom; Home Assistant is optional for diagnostics.
 
-Current version: **battery-guard-1.3**, built with **ESPHome 2026.9.0**.
+Current version: **battery-guard-1.4**, built with **ESPHome 2026.9.0**.
 
 ## AI creation and human direction
 
@@ -73,3 +73,39 @@ The decoder uses a 6 ms receive gap, folds isolated glitches up to 150 microseco
 ## Upstream attribution
 
 Base configuration and Flash_comp: [athom-tech/esp32-configs](https://github.com/athom-tech/esp32-configs), pinned at `6181202ed9fe274c3f994112ef3b847f295dd9f4`. These third-party sources are fetched by `fetch_stock.py` and during the build and are not vendored here. ESPHome: https://github.com/esphome/esphome.
+
+
+## Passive diagnostics and missed-press reports (v1.4)
+
+Keep the remote in its normal location. The five-minute control logic and decoder are unchanged; diagnostics observe normal use.
+
+### Where records live
+
+- **Athom RAM:** a fixed 4,116-byte ring stores the latest 12 plausible remote-frame candidates, with up to 160 pulse durations each, partial decoded code, rejection reason, sequence number, and device uptime. The logger/counters/API add some overhead beyond the ring. No diagnostic writes go to Athom flash. A reboot loses this buffer; overflow replaces the oldest candidate and increments an exposed counter.
+- **Home Assistant disk:** the optional custom integration continuously subscribes to the native RF stream, including noise/noncandidate bursts, records selected state changes and device logs, and requests a ring dump every minute and after reconnect. The private SQLite file is `/config/battery_light_diagnostics/rolling.sqlite3`. Records are committed with SQLite FULL synchronization in batches every two seconds, off the HA event loop. Up to two seconds of queued data can be lost on abrupt power failure. A 512-record queue bounds memory; dropped-record counts and connection gaps are visible.
+- **Retention:** rolling payload is capped at 256 MiB or seven days, whichever limit comes first. SQLite is capped at 512 MiB of pages; its reusable allocated file space can exceed current payload. The status sensor shows actual oldest/newest available records. Continuous noise means seven days is not guaranteed.
+- **Incidents:** the Report Missed On button saves the preceding 60 minutes to a separate compressed JSONL file under `/config/battery_light_diagnostics/incidents/`. Keep the latest 20 incidents, each limited to 64 MiB of uncompressed records; truncation is explicitly recorded. These files are not removed when the rolling log rotates. They are not automatically uploaded anywhere. Copy important incidents elsewhere before the 20-report retention limit.
+
+Install `custom_components/battery_light_diagnostics` in HA's `/config/custom_components`, adapt `home-assistant.example.yaml` with your own secrets, check the HA configuration, and restart HA. The integration depends on the existing ESPHome integration's API library and opens one additional native-API connection. No MQTT broker or permission for the Athom to execute HA actions is required.
+
+HA entities:
+
+- `sensor.battery_light_rf_recorder`: recording/disconnected/error, queue drops, retention bounds, and latest incident path.
+- `button.battery_light_report_missed_on`: records your report, requests the available RAM buffer, and preserves the recent window. It does not transmit Power On or Off.
+- The firmware adds raw-burst, rejected-candidate, receiver-error, and overwritten-candidate counters.
+
+For a delayed report, call `battery_light_diagnostics.report_missed_on` with `lookback_minutes` (1–1440) and a `note`. The action optionally returns the incident path, count, and truncation status. Normal HA backups that include the configuration directory should include these private files; they are not a substitute for an independently verified backup.
+
+The Athom cannot detect a press it never hears. An owner report is the reference observation. A candidate filter can miss badly damaged frames, which is why HA retains the full raw stream. During an HA/network outage, only the bounded candidate ring remains; complete raw recording resumes after reconnect. `Power Off heard` may be the Athom hearing its own transmission rather than the remote. Diagnostic record timestamps distinguish HA wall-clock receipt time from the device uptime in buffered records.
+
+Additional tests:
+
+```sh
+c++ -std=c++17 -Wall -Wextra -Werror test_diagnostics.cpp -o /tmp/test_diagnostics
+/tmp/test_diagnostics
+python3 test_storage.py
+```
+
+The ring tests cover acceptance/rejection, wrapping, overwritten snapshot records, and memory bounds. Storage tests cover bounded retention, reopening, preserved incidents, and incident rotation.
+
+Deployment validation on September 19, 2026: v1.4 compiled successfully (about 1.49 MB firmware), was read back on the device, and the HA recorder persisted raw RF and state records across the firmware reboot. The snapshot action is asynchronous: it emits log records and does not return an API action response. The unchanged decoder/control tests and new buffer/storage tests pass. No new physical range or shutoff reliability claim is made.
