@@ -6,14 +6,16 @@
 namespace battery_light_stream_core {
 // Main-loop-only diagnostic recorder. It observes, but never changes, decoder input.
 // The decoder's leader transition starts a bounded trace, including raw history.
-// Records are drained outside the receive loop.
-template<uint32_t Capacity = 16, uint32_t Pulses = 128> class EdgeTrace {
+// Records are drained outside the receive loop. Only accepted frames and traces that
+// reached MinBits valid data bits are reported: ambient noise rarely forms more than two.
+template<uint32_t Capacity = 4, uint32_t Pulses = 128, uint32_t MinBits = 4> class EdgeTrace {
  public:
   static_assert(Pulses >= 16, "Trace must hold its pre-leader history");
   struct Record {
     uint32_t sequence{0}, uptime_ms{0}, code{0};
     uint32_t discontinuities{0}, overflows{0};
     uint16_t length{0};
+    uint8_t bits{0};
     const char *end{"idle"};
     int16_t pulses[Pulses]{};
   };
@@ -47,21 +49,31 @@ template<uint32_t Capacity = 16, uint32_t Pulses = 128> class EdgeTrace {
   }
 
   void accepted(uint32_t code) { if (active_) current_.code = code; }
+  void progress(uint32_t bits) { if (active_ && bits > current_.bits) current_.bits = static_cast<uint8_t>(bits); }
   void idle() { finish("idle"); }
   uint32_t count() const { return sequence_; }
 
+  // Emits at most one reportable trace per call. Overwritten traces become one summary
+  // line instead of one line each, so a slow drain can never fall permanently behind.
   bool next_dump(char *out, size_t capacity) {
-    if (next_ > sequence_) return false;
-    uint32_t wanted = next_++;
-    const Record &r = records_[(wanted - 1) % Capacity];
-    if (r.sequence != wanted) {
-      std::snprintf(out, capacity, "BGEDGE {\"lost_sequence\":%lu}", static_cast<unsigned long>(wanted));
+    uint32_t oldest = sequence_ > Capacity ? sequence_ - Capacity + 1 : 1;
+    if (next_ < oldest) {
+      std::snprintf(out, capacity, "BGEDGE {\"lost_sequences\":[%lu,%lu]}",
+                    static_cast<unsigned long>(next_), static_cast<unsigned long>(oldest - 1));
+      next_ = oldest;
       return true;
     }
+    const Record *found = nullptr;
+    while (next_ <= sequence_ && !found) {
+      const Record &r = records_[(next_++ - 1) % Capacity];
+      if (r.code || r.bits >= MinBits) found = &r;
+    }
+    if (!found) return false;
+    const Record &r = *found;
     int used = std::snprintf(out, capacity,
-        "BGEDGE {\"sequence\":%lu,\"uptime_ms\":%lu,\"end\":\"%s\",\"code\":\"%08lX\",\"discontinuities\":%lu,\"overflows\":%lu,\"timings_us\":[",
+        "BGEDGE {\"sequence\":%lu,\"uptime_ms\":%lu,\"end\":\"%s\",\"code\":\"%08lX\",\"bits\":%u,\"discontinuities\":%lu,\"overflows\":%lu,\"timings_us\":[",
         static_cast<unsigned long>(r.sequence), static_cast<unsigned long>(r.uptime_ms), r.end,
-        static_cast<unsigned long>(r.code), static_cast<unsigned long>(r.discontinuities),
+        static_cast<unsigned long>(r.code), static_cast<unsigned>(r.bits), static_cast<unsigned long>(r.discontinuities),
         static_cast<unsigned long>(r.overflows));
     if (used < 0 || static_cast<size_t>(used) >= capacity) return false;
     size_t pos = static_cast<size_t>(used);

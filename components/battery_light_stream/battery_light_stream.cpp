@@ -41,6 +41,7 @@ void StreamReceiver::loop() {
     uint32_t code = decoder_.push(pulse);  // Zero resets an incomplete candidate.
     if (decoder_.starts() != starts)
       trace_.begin(micros() / 1000, discontinuities_.load(std::memory_order_relaxed), queue_.overflows());
+    trace_.progress(decoder_.bits());
     accept_(code);
   }
   // Read the edge timestamp before the clock to avoid subtraction underflow

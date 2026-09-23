@@ -1,12 +1,11 @@
 packages:
   stock: !include stock.yaml
 substitutions:
-  project_version: "battery-guard-1.9"
+  project_version: "battery-guard-1.10"
   log_level: INFO
 esphome:
   includes:
     - guard.h
-    - diagnostics.h
 wifi:
   reboot_timeout: 0s
 update:
@@ -26,41 +25,34 @@ battery_light_stream:
     - lambda: |-
         if (battery_guard::instance.receive(code, millis()))
           ESP_LOGI("battery_guard", "BGSTREAM code=%08X", static_cast<unsigned int>(code));
+# The GPIO stream above is the only battery-light decoder. The RMT receiver now serves only
+# learning and the RF proxy, which feeds HA's raw recorder; its capture settings are unchanged
+# from v1.9 so recorded bursts stay comparable. It no longer copies bursts into an on_raw lambda.
 remote_receiver:
   - id: !extend rf_receiver
     pin:
       number: ${RF_RX_PIN}
       inverted: true
       allow_other_uses: true
-    # Post-capture filtering for the existing RMT proxy/learning path.
     # Classic ESP32 hardware filtering is capped near 3.2us by the APB clock.
-    # The independent GPIO stream above avoids RMT packet truncation.
     filter: 250us
     idle: 6ms
     receive_symbols: 512
     buffer_size: 10000b
-    on_raw:
-      - lambda: |-
-          battery_guard::diagnostics.observe(x.data(), x.size(), millis());
-          for (size_t i = 0; i + 67 <= x.size(); ++i) {
-            auto code = battery_guard::frame(x.data(), x.size(), i);
-            if (code && battery_guard::instance.receive(code, millis())) {
-              ESP_LOGI("battery_guard", "Heard %s", battery_guard::instance.command);
-            }
-          }
+# Guard state is published when it changes (see the 100ms interval), not polled.
 text_sensor:
   - platform: template
+    id: guard_command
     name: "Battery Light Last Command"
-    lambda: return std::string(battery_guard::instance.command);
-    update_interval: 1s
+    update_interval: never
   - platform: template
+    id: guard_status
     name: "Battery Light Protection"
-    lambda: return std::string(battery_guard::instance.status);
-    update_interval: 1s
+    update_interval: never
   - platform: template
+    id: guard_action
     name: "Battery Light Last Action"
-    lambda: return std::string(battery_guard::instance.action);
-    update_interval: 1s
+    update_interval: never
 sensor:
   - platform: template
     name: "Battery Light Stream Edges"
@@ -81,32 +73,16 @@ sensor:
     name: "Battery Light Stream Frames"
     accuracy_decimals: 0
     lambda: return id(battery_stream).frames();
-    update_interval: 1s
+    update_interval: 30s
   - platform: template
     name: "Battery Light Edge Traces"
     accuracy_decimals: 0
     lambda: return id(battery_stream).edge_traces();
     update_interval: 30s
   - platform: template
-    name: "Battery Light Raw Bursts"
-    accuracy_decimals: 0
-    lambda: return battery_guard::diagnostics.raw_bursts;
-    update_interval: 30s
-  - platform: template
-    name: "Battery Light Rejected Candidates"
-    accuracy_decimals: 0
-    lambda: return battery_guard::diagnostics.rejected_frames;
-    update_interval: 30s
-  - platform: template
     name: "Battery Light Receiver Errors"
     accuracy_decimals: 0
-    lambda: return battery_guard::diagnostics.receiver_errors;
-    update_interval: 30s
-  - platform: template
-    name: "Battery Light Diagnostic Overwrites"
-    accuracy_decimals: 0
-    lambda: |-
-      return battery_guard::diagnostics.sequence > 12 ? battery_guard::diagnostics.sequence - 12 : 0;
+    lambda: return battery_guard::receiver_errors;
     update_interval: 30s
   - platform: template
     name: "Battery Light Fallback Remaining"
@@ -115,17 +91,23 @@ sensor:
     lambda: return battery_guard::instance.remaining(millis());
     update_interval: 5s
   - platform: template
+    id: guard_count
     name: "Battery Light Command Count"
     accuracy_decimals: 0
-    lambda: return battery_guard::instance.count;
-    update_interval: 1s
+    update_interval: never
+  # Largest single allocatable block. Total free heap hides fragmentation.
+  - platform: debug
+    block:
+      name: "Heap Max Block"
+      unit_of_measurement: "KiB"
+      accuracy_decimals: 1
+      filters:
+        - multiply: 0.0009765625
 interval:
   - interval: 250ms
     then:
       - lambda: |-
           char record[1536];
-          if (battery_guard::diagnostics.next_dump(record, sizeof(record)))
-            ESP_LOGI("battery_guard_diag", "%s", record);
           if (id(battery_stream).next_edge_dump(record, sizeof(record)))
             ESP_LOGI("battery_guard_edges", "%s", record);
   - interval: 1s
@@ -135,6 +117,27 @@ interval:
             lambda: return battery_guard::instance.tick(millis());
           then:
             - script.execute: battery_light_off
+  - interval: 100ms
+    then:
+      - lambda: |-
+          static uint32_t published = UINT32_MAX;
+          auto &g = battery_guard::instance;
+          if (g.changes == published) return;
+          published = g.changes;
+          id(guard_command).publish_state(g.command);
+          id(guard_status).publish_state(g.status);
+          id(guard_action).publish_state(g.action);
+          id(guard_count).publish_state(g.count);
+  # wifi/api reboot_timeout stay 0s so a reboot never cancels a pending Off. Instead, restart
+  # after 10 minutes without Home Assistant, only while no fallback countdown is running.
+  - interval: 30s
+    then:
+      - lambda: |-
+          bool connected = api::global_api_server != nullptr && api::global_api_server->is_connected();
+          if (battery_guard::recovery.should_restart(connected, battery_guard::instance.active, millis())) {
+            ESP_LOGW("battery_guard", "No Home Assistant connection for 10 minutes and no fallback pending; restarting");
+            App.safe_reboot();
+          }
 script:
   - id: battery_light_off
     mode: single
@@ -147,20 +150,12 @@ button:
   - platform: template
     name: "Battery Light Verified Power Off"
     on_press:
-      - lambda: |-
-          battery_guard::instance.active = false;
-          battery_guard::instance.status = "Off sent (unconfirmed)";
-          battery_guard::instance.action = "Manual Power Off transmitted";
+      - lambda: battery_guard::instance.manual_off();
       - script.execute: battery_light_off
 
-api:
-  actions:
-    - action: diagnostic_snapshot
-      then:
-        - lambda: battery_guard::diagnostics.request_dump();
 logger:
   tx_buffer_size: 2048
   on_message:
     - lambda: |-
         if (level <= 2 && strncmp(tag, "remote_receiver", 15) == 0)
-          ++battery_guard::diagnostics.receiver_errors;
+          ++battery_guard::receiver_errors;

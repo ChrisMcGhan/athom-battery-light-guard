@@ -8,6 +8,7 @@ class Decoder {
  public:
   void reset() { pending_ = glitch_ = 0; state_ = SEARCH; bits_ = code_ = 0; }
   uint32_t starts() const { return starts_; }
+  uint32_t bits() const { return state_ == SEARCH ? 0 : bits_; }
   uint32_t push(int32_t value) {
     if (!value) { reset(); return 0; }
     if (value > 1000000) value = 1000000;
