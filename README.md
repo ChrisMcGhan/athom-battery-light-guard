@@ -2,7 +2,7 @@
 
 ESPHome firmware overlay for an Athom ESP32 RF/IR Remote. It listens for a specific 433.92 MHz battery-light remote and sends Power Off **five minutes after Power On**, unless a native timer button was heard. The countdown runs on the Athom; Home Assistant is optional for diagnostics.
 
-Current version: **battery-guard-1.4**, built with **ESPHome 2026.9.0**.
+Current version: **battery-guard-1.9**, built with **ESPHome 2026.9.0**.
 
 ## AI creation and human direction
 
@@ -32,9 +32,11 @@ This recognizes one captured remote command set, not all 433 MHz lights. Carrier
 
 - `guard.h`: allocation-free pulse decoder and countdown state machine.
 - `guard.yaml`: ESPHome overlay, Off waveform, and Home Assistant diagnostic entities.
+- `components/battery_light_stream`: continuous GPIO edge capture, exact stream decoder, ordered-loss queue, and bounded pre-decoder traces.
+- `custom_components/battery_light_diagnostics`: multi-receiver Home Assistant recorder, exact host-side decoder, shared recognized events, and incident exports.
 - `fetch_stock.py`: fetches and verifies Athom's pinned configuration, generating `stock.yaml` with a pinned Flash_comp dependency.
 - `samples/frames.json`: one recorded frame per button, stripped of capture metadata.
-- `test_guard.cpp`, `test_captures.py`: state-machine and recorded-waveform tests.
+- `test_guard.cpp`, `test_captures.py`, `test_stream*.py`, `test_edge_trace.py`, `test_multi_receiver.py`, and `test_recorder.py`: state, decoder, stream, queue-loss, trace, and recorder tests.
 
 The program retains upstream RF/IR and Bluetooth proxy features. It removes the vendor firmware-update entity because installing stock firmware would remove this overlay.
 
@@ -56,6 +58,11 @@ Provision the device's Wi-Fi using the supported Athom/ESPHome provisioning flow
 
 ```sh
 python3 test_captures.py
+python3 test_stream.py
+python3 test_stream_adapter.py
+python3 test_edge_trace.py
+python3 test_multi_receiver.py
+python3 test_recorder.py
 ```
 
 Requires a C++17 compiler named `c++` on PATH. Tests cover the five-minute boundary, cancellation by all four timers and Off, repeated frames, restart, unrelated commands, clock rollover, twelve captured command signatures, truncation, and invalid pulses.
@@ -66,7 +73,7 @@ Live hardware testing confirmed remote Power On recognition, native Timer 30 can
 
 Home Assistant receives last command, protection status, last action, remaining seconds, and command count through the ESPHome native API. These describe commands heard/sent, not measured lamp state. The receiver may hear its own Off transmission and then report `Power Off heard` / `Idle`. There is no lamp acknowledgment. Missed RF commands, loss of power, or a reboot can defeat the fallback; this is a convenience feature.
 
-The decoder uses a 6 ms receive gap, folds isolated glitches up to 150 microseconds, and requires a known complete 32-bit signature with leader and trailer. The signature is a recognition convention, not a claim of a fully documented protocol. Transmit timings have different polarity/alignment from the plotted receiver samples.
+The original RMT path uses a 6 ms receive gap and a 250 microsecond post-capture filter. Classic ESP32 RMT capture still has a finite hardware-symbol allocation, so v1.6 added an independent continuous GPIO edge path. Both decoders fold isolated glitches up to 150 microseconds and require a known complete 32-bit signature with leader and trailer. The signature is a recognition convention, not a claim of a fully documented protocol. Transmit timings have different polarity/alignment from the plotted receiver samples.
 
 ![Recorded waveforms](samples/waveforms.png)
 
@@ -75,18 +82,28 @@ The decoder uses a 6 ms receive gap, folds isolated glitches up to 150 microseco
 Base configuration and Flash_comp: [athom-tech/esp32-configs](https://github.com/athom-tech/esp32-configs), pinned at `6181202ed9fe274c3f994112ef3b847f295dd9f4`. These third-party sources are fetched by `fetch_stock.py` and during the build and are not vendored here. ESPHome: https://github.com/esphome/esphome.
 
 
-## Passive diagnostics and missed-press reports (v1.4)
+## Version history after v1.4
+
+- **v1.5:** raises the existing RMT output filter to 250 microseconds. Source review established that the setting primarily filters after capture on classic ESP32 hardware; it does not prevent the finite RMT symbol memory from filling.
+- **v1.6:** adds an independent continuous GPIO edge receiver with a bounded 2,048-edge queue and exact command whitelist. The existing RMT learning, proxy, RF transmit, IR, Bluetooth, and five-minute fallback paths remain available.
+- **v1.7:** records queue loss in chronological order so a later overflow cannot erase a complete command already waiting ahead of it.
+- **v1.8:** adds bounded pre-decoder `BGEDGE` traces for the GPIO path without changing command acceptance.
+- **v1.9:** starts those traces at the decoder's actual leader transition and includes the preceding 16 pulses, covering leaders reconstructed around a short opposite-polarity glitch.
+
+The current Home Assistant component accepts multiple receivers, decodes every native RF callback against the exact signature set, tags records by receiver and capture, correlates repeated copies within 800 ms, and emits `battery_light_rf_recognized` for accepted commands. Validated `BGSTREAM` markers from the custom firmware join the same event path. Correlation is based on Home Assistant arrival time; it is not proof that records came from one physical press or that receiver clocks are synchronized.
+
+## Passive diagnostics and missed-press reports
 
 Keep the remote in its normal location. The five-minute control logic and decoder are unchanged; diagnostics observe normal use.
 
 ### Where records live
 
-- **Athom RAM:** a fixed 4,116-byte ring stores the latest 12 plausible remote-frame candidates, with up to 160 pulse durations each, partial decoded code, rejection reason, sequence number, and device uptime. The logger/counters/API add some overhead beyond the ring. No diagnostic writes go to Athom flash. A reboot loses this buffer; overflow replaces the oldest candidate and increments an exposed counter.
-- **Home Assistant disk:** the optional custom integration continuously subscribes to the native RF stream, including noise/noncandidate bursts, records selected state changes and device logs, and requests a ring dump every minute and after reconnect. The private SQLite file is `/config/battery_light_diagnostics/rolling.sqlite3`. Records are committed with SQLite FULL synchronization in batches every two seconds, off the HA event loop. Up to two seconds of queued data can be lost on abrupt power failure. A 512-record queue bounds memory; dropped-record counts and connection gaps are visible.
+- **Athom RAM:** a fixed 4,116-byte candidate ring stores the latest 12 plausible RMT frames. The continuous path has a separate bounded 2,048-edge queue and sixteen bounded 128-pulse diagnostic traces. No diagnostic writes go to Athom flash. A reboot loses these buffers; counters expose replacement, overflow, discontinuity, and trace activity.
+- **Home Assistant disk:** the optional custom integration connects directly to each configured receiver through the native ESPHome API. It records RF callbacks, exact recognized commands, selected state changes, device logs, receiver identity, and connection gaps. The private SQLite file is `/config/battery_light_diagnostics/rolling.sqlite3`. Records are committed with SQLite FULL synchronization in batches every two seconds, off the HA event loop. Up to two seconds of queued data can be lost on abrupt power failure. A 512-record queue bounds memory; dropped-record counts and per-receiver status are visible.
 - **Retention:** rolling payload is capped at 256 MiB or seven days, whichever limit comes first. SQLite is capped at 512 MiB of pages; its reusable allocated file space can exceed current payload. The status sensor shows actual oldest/newest available records. Continuous noise means seven days is not guaranteed.
 - **Incidents:** the Report Missed On button saves the preceding 60 minutes to a separate compressed JSONL file under `/config/battery_light_diagnostics/incidents/`. Keep the latest 20 incidents, each limited to 64 MiB of uncompressed records; truncation is explicitly recorded. These files are not removed when the rolling log rotates. They are not automatically uploaded anywhere. Copy important incidents elsewhere before the 20-report retention limit.
 
-Install `custom_components/battery_light_diagnostics` in HA's `/config/custom_components`, adapt `home-assistant.example.yaml` with your own secrets, check the HA configuration, and restart HA. The integration depends on the existing ESPHome integration's API library and opens one additional native-API connection. No MQTT broker or permission for the Athom to execute HA actions is required.
+Install `custom_components/battery_light_diagnostics` in HA's `/config/custom_components`, adapt `home-assistant.example.yaml` with your own secrets, check the HA configuration, and restart HA. The integration depends on the existing ESPHome integration's API library and opens one additional native-API connection per configured receiver. No MQTT broker or permission for an Athom to execute HA actions is required.
 
 HA entities:
 
@@ -108,4 +125,4 @@ python3 test_storage.py
 
 The ring tests cover acceptance/rejection, wrapping, overwritten snapshot records, and memory bounds. Storage tests cover bounded retention, reopening, preserved incidents, and incident rotation.
 
-Deployment validation on September 19, 2026: v1.4 compiled successfully (about 1.49 MB firmware), was read back on the device, and the HA recorder persisted raw RF and state records across the firmware reboot. The snapshot action is asynchronous: it emits log records and does not return an API action response. The unchanged decoder/control tests and new buffer/storage tests pass. No new physical range or shutoff reliability claim is made.
+Deployment validation through September 22, 2026: v1.9 compiled and was read back from the intended device; the Home Assistant recorder retained active records from three connected receivers with no reported storage drops. Stream, queue-loss, trace, decoder, and recorder tests pass. This verifies software operation and storage, not reliable recognition of every physical transmission. Private operational captures, device addresses, credentials, and compiled firmware are intentionally excluded from this repository.

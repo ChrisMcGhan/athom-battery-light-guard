@@ -6,3 +6,7 @@ secrets.yaml
 *.elf
 .DS_Store
 stock.yaml
+*.jsonl
+*.jsonl.gz
+*.sqlite3
+incidents/

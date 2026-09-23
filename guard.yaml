@@ -1,7 +1,7 @@
 packages:
   stock: !include stock.yaml
 substitutions:
-  project_version: "battery-guard-1.4"
+  project_version: "battery-guard-1.9"
   log_level: INFO
 esphome:
   includes:
@@ -11,8 +11,31 @@ wifi:
   reboot_timeout: 0s
 update:
   - id: !remove update_http_request
+external_components:
+  - source:
+      type: local
+      path: components
+    components: [battery_light_stream]
+battery_light_stream:
+  id: battery_stream
+  pin:
+    number: ${RF_RX_PIN}
+    inverted: true
+    allow_other_uses: true
+  on_code:
+    - lambda: |-
+        if (battery_guard::instance.receive(code, millis()))
+          ESP_LOGI("battery_guard", "BGSTREAM code=%08X", static_cast<unsigned int>(code));
 remote_receiver:
   - id: !extend rf_receiver
+    pin:
+      number: ${RF_RX_PIN}
+      inverted: true
+      allow_other_uses: true
+    # Post-capture filtering for the existing RMT proxy/learning path.
+    # Classic ESP32 hardware filtering is capped near 3.2us by the APB clock.
+    # The independent GPIO stream above avoids RMT packet truncation.
+    filter: 250us
     idle: 6ms
     receive_symbols: 512
     buffer_size: 10000b
@@ -39,6 +62,31 @@ text_sensor:
     lambda: return std::string(battery_guard::instance.action);
     update_interval: 1s
 sensor:
+  - platform: template
+    name: "Battery Light Stream Edges"
+    accuracy_decimals: 0
+    lambda: return id(battery_stream).edges();
+    update_interval: 30s
+  - platform: template
+    name: "Battery Light Stream Overflows"
+    accuracy_decimals: 0
+    lambda: return id(battery_stream).overflows();
+    update_interval: 30s
+  - platform: template
+    name: "Battery Light Stream Discontinuities"
+    accuracy_decimals: 0
+    lambda: return id(battery_stream).discontinuities();
+    update_interval: 30s
+  - platform: template
+    name: "Battery Light Stream Frames"
+    accuracy_decimals: 0
+    lambda: return id(battery_stream).frames();
+    update_interval: 1s
+  - platform: template
+    name: "Battery Light Edge Traces"
+    accuracy_decimals: 0
+    lambda: return id(battery_stream).edge_traces();
+    update_interval: 30s
   - platform: template
     name: "Battery Light Raw Bursts"
     accuracy_decimals: 0
@@ -78,6 +126,8 @@ interval:
           char record[1536];
           if (battery_guard::diagnostics.next_dump(record, sizeof(record)))
             ESP_LOGI("battery_guard_diag", "%s", record);
+          if (id(battery_stream).next_edge_dump(record, sizeof(record)))
+            ESP_LOGI("battery_guard_edges", "%s", record);
   - interval: 1s
     then:
       - if:
